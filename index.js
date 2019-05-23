@@ -11,71 +11,8 @@ const log = Scratch.log;
 class DisplayExtension{
     constructor(runtime){
         this.runtime = runtime;
-        this.comm = runtime.ioDevices.kblock;
-        this.session = null;
-        // session callbacks
-        this.onmessage = this.onmessage.bind(this);
-        this.onclose = this.onclose.bind(this);
-
-        this.decoder = new TextDecoder();
-        this.lineBuffer = '';
-}
-    write (data){
-        if (!data.endsWith('\n')) data += '\n';
-        if (this.session) this.session.write(data);
     }
-
-    report (data){
-        return new Promise(resolve => {
-            this.write(data);
-            this.reporter = resolve;
-        });
-    }
-
-
-    onmessage (data){
-        const dataStr = this.decoder.decode(data);
-        this.lineBuffer += dataStr;
-        if (this.lineBuffer.indexOf('\n') !== -1){
-            const lines = this.lineBuffer.split('\n');
-            this.lineBuffer = lines.pop();
-            for (const l of lines){
-                if (this.reporter) this.reporter(l);
-            }
-        }
-    }
-
-    onclose (){
-        this.session = null;
-    }
-
-    // method required by vm runtime
-    scan (){
-        this.comm.getDeviceList().then(result => {
-            this.runtime.emit(this.runtime.constructor.PERIPHERAL_LIST_UPDATE, result);
-        });
-    }
-
-    connect (id){
-        this.comm.connect(id).then(sess => {
-            this.session = sess;
-            this.session.onmessage = this.onmessage;
-            this.session.onclose = this.onclose;
-            // notify gui connected
-            this.runtime.emit(this.runtime.constructor.PERIPHERAL_CONNECTED);
-        }).catch(err => {
-            log.warn('connect peripheral fail', err);
-        });
-    }
-
-    disconnect (){
-        this.session.close();
-    }
-
-    isConnected (){
-        return Boolean(this.session);
-    }
-
+   
     _buildMenuFromArray (ary){
         return ary.map((entry, index) => {
             const obj = {};
@@ -102,32 +39,6 @@ class DisplayExtension{
 
             blocks: [
                 {
-                    opcode: 'led',
-                    blockType: BlockType.COMMAND,
-
-                    text: formatMessage({
-                        id: 'display.led',
-                        default: 'LED Pin[PIN] Level[VALUE]'
-                    }),
-                    arguments: {
-                        PIN: {
-                            type: ArgumentType.STRING,
-                            defaultValue: '13',
-                            menu: 'digiPin'
-                        },
-                        VALUE: {
-                            type: ArgumentType.STRING,
-                            menu: 'onoff',
-                            defaultValue: 'HIGH'
-                        }
-                    },
-                    func: 'noop',
-                    gen: {
-                        arduino: this.ledGen
-                    }
-                },
-                '---',
-                {
                     opcode: 'lcdsetup',
                     blockType: BlockType.COMMAND,
 
@@ -141,7 +52,7 @@ class DisplayExtension{
                             defaultValue: '0x3F'
                         }
                     },
-                    func: 'noop',
+                    func: 'lcdsetup',
                     gen: {
                         arduino: this.lcdSetupGen
                     }
@@ -160,7 +71,7 @@ class DisplayExtension{
                             defaultValue: 'Hello World'
                         }
                     },
-                    func: 'noop',
+                    func: 'lcdprint',
                     gen: {
                         arduino: this.lcdprintGen
                     }
@@ -180,7 +91,7 @@ class DisplayExtension{
                             menu: 'onoff'
                         }
                     },
-                    func: 'noop',
+                    func: 'lcdbl',
                     gen: {
                         arduino: this.lcdblGen
                     }
@@ -203,7 +114,7 @@ class DisplayExtension{
                             defaultValue: 1
                         }
                     },
-                    func: 'noop',
+                    func: 'lcdcursor',
                     gen: {
                         arduino: this.lcdcursorGen
                     }
@@ -216,7 +127,7 @@ class DisplayExtension{
                         id: 'display.lcdclear',
                         default: 'LCD Clear'
                     }),
-                    func: 'noop',
+                    func: 'lcdclear',
                     gen: {
                         arduino: this.lcdclearGen
                     }
@@ -365,29 +276,21 @@ class DisplayExtension{
                 onoff: [{text: 'ON', value: 'HIGH'}, {text: 'OFF', value: 'LOW'}],
                 analogPin: this._buildMenuFromArray(['A0', 'A1', 'A2', 'A3', 'A4', 'A5']),
                 analogWritePin: this._buildMenuFromArray(['3', '5', '6', '9', '10', '11']),
-                '#displayCatalog': [
-                    {src: 'static/extension-assets/arduino/SharkLED.png',
-                        value: 'LED', width: 128, height: 128, alt: 'LED'},
-                    {src: 'static/extension-assets/arduino/1602LCD.png',
-                        value: 'LCD', width: 128, height: 128, alt: 'LCD'},
-                    {src: 'static/extension-assets/arduino/ws2812Strip.png',
-                        value: 'RGB', width: 128, height: 128, alt: 'RGB'},
-                    {src: 'static/extension-assets/arduino/DigiTube.png',
-                        value: 'DigitalTube', width: 128, height: 128, alt: 'DigitalTube'},
-                ]
             }
         };
     }
 
 
     noop (){
-
+        return Promise.reject("Unsupport block in online mode")
     }
 
-    ledGen (gen, block){
-        const pin = gen.valueToCode(block, 'PIN');
-        gen.setupCodes_['led_'+pin] = `pinMode(${pin}, OUTPUT)`;
-        return gen.template2code(block, 'digitalWrite');
+    lcdsetup (args){
+        const addr = parseInt(args.ADDR, 16);
+        this.lcd = new five.LCD({
+            controller: "PCF8574",
+            addr: addr
+        });
     }
 
     lcdSetupGen (gen, block){
@@ -398,16 +301,36 @@ class DisplayExtension{
         return `lcd.begin()`;
     }
 
+    lcdprint (args){
+        const line = args.LINE;
+        this.lcd && this.lcd.print(line)
+    }
+
     lcdprintGen (gen, block){
         return gen.template2code(block, 'lcd.print');
+    }
+
+    lcdbl (args){
+        const bl = args.BL === 'HIGH' ? 255 : 0;
+        this.lcd && this.lcd.backlight(bl);
     }
 
     lcdblGen (gen, block){
         return gen.template2code(block, 'lcd.setBacklight');
     }
 
+    lcdcursor (args){
+        const col = args.COL;
+        const row = args.ROW;
+        this.lcd && this.lcd.cursor(row, col);
+    }
+
     lcdcursorGen (gen, block){
         return gen.template2code(block, 'lcd.setCursor');
+    }
+
+    lcdclear (args){
+        this.lcd && this.lcd.clear();
     }
 
     lcdclearGen (gen, block){
